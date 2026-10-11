@@ -1,0 +1,478 @@
+# Pipeline reutilizable del worker de CI de Kairos (MajinTechnologies/kairos-ci).
+#
+# Versionado central: los repos consumidores invocan este workflow via
+#   uses: MajinTechnologies/kairos-ci/.github/workflows/kairos-pipeline.yml@vX.Y.Z
+# desde un workflow delgado (.github/workflows/kairos-worker.yml). El perfil
+# `.opencode/` YA NO se copia a mano: este pipeline lo sincroniza en runtime
+# desde el tag `worker_ref`. Para actualizar el worker, el consumidor bumpea el
+# ref del `uses:` y el input `worker_ref` (2 lugares).
+#
+# Diseno: Majin-Circino#144 (comentarios "Diseno: Cadena de sesiones atomicas"
+# y "Contrato de secrets") + Majin-Kairos/protocols/ci-chain.md.
+#
+# Anti-loop:
+#   - Solo GITHUB_TOKEN de Actions (los eventos generados con el token
+#     automatico de Actions NO re-dispara workflows) -> los comentarios/labels
+#     que ponga el worker no generan runs nuevos.
+#   - Disparo exclusivo por label `kairos:ci` (nunca por status:*).
+#   - concurrency group serializa runs (una etapa a la vez).
+#   - timeout de job.
+#
+# NOTA reusable workflow:
+#   - Al ser llamado, el `github` context es el del CALLER (repo/evento/actor
+#     del consumidor) y `actions/checkout` sin `repository` baja el repo del
+#     consumidor. Los `env:` del caller NO se heredan: aca se definen a nivel job.
+#   - Un reusable workflow corre en un runner NUEVO por job: los `.opencode/`
+#     que sincronice el caller NO llegan a este job. Por eso el sync del perfil
+#     vive DENTRO de este pipeline (ver "Sync perfil worker"), despues del
+#     checkout del consumidor para pisar la copia vieja que el repo traiga.
+name: kairos-pipeline
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "chain = ejecuta la siguiente etapa de la cadena; auth-check = smoke test de credencial (valida y reporta el modo detectado, NO ejecuta etapa); guard-check = smoke test del catch-up guard (valida el scope actions:read y reporta skip/procede, NO ejecuta etapa)"
+        required: true
+        type: string
+      issue_number:
+        description: "Numero de issue objetivo (vacio en schedule/manual sin issue)"
+        required: false
+        type: string
+      event_name:
+        description: "Nombre del evento del caller (contexto del worker)"
+        required: false
+        type: string
+        default: "manual"
+      opencode_version:
+        description: "Pin de opencode-ai (bump como commit aparte)"
+        required: false
+        type: string
+        default: "1.18.35"
+      opencode_model:
+        description: "Modelo Zen free tier (contrato #144)"
+        required: false
+        type: string
+        default: "opencode/big-pickle"
+      groq_model:
+        description: "Modelo Groq (alternativa estable, ver README)"
+        required: false
+        type: string
+        default: "groq/llama-3.3-70b-versatile"
+      operator_name:
+        description: "Nombre del operador/dueno del proyecto (MAJIN_OPERATOR_NAME)"
+        required: false
+        type: string
+        default: "Mr J"
+      worker_ref:
+        description: "Tag del worker desde el que se sincroniza el perfil .opencode/"
+        required: false
+        type: string
+        default: "kairos/v1.0.1"
+    secrets:
+      OPENCODE_AUTH:
+        description: "JSON de ~/.local/share/opencode/auth.json (Zen, free tier)"
+        required: false
+      GROQ_API_KEY:
+        description: "API key de Groq (alternativa estable)"
+        required: false
+      KAIROS_WORKER_TOKEN:
+        description: "PAT fine-grained (org secret) con contents+metadata read sobre MajinTechnologies/kairos-worker-poc; hace el checkout cross-repo del perfil .opencode/ en el repo worker PRIVADO"
+        required: true
+
+permissions:
+  contents: write   # etapa 3: crea ramas y pushea (flujo branch + PR)
+  issues: write     # comentarios + labels de la cadena
+  pull-requests: write  # worker crea/edita PRs y pide reviewers (flujo branch + PR)
+  actions: read     # el guard lista workflow runs via API
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    # No se hereda env del caller: todo se define aca tomando los inputs.
+    env:
+      GH_TOKEN: ${{ github.token }}       # gh CLI del worker (anti-loop: ver cabecera)
+      GITHUB_TOKEN: ${{ github.token }}   # MCP github + circino
+      MODE: ${{ inputs.mode }}
+      OPENCODE_VERSION: ${{ inputs.opencode_version }}   # pin deliberado - bump como commit aparte
+      OPENCODE_MODEL: ${{ inputs.opencode_model }}       # Zen free tier (contrato #144)
+      GROQ_MODEL: ${{ inputs.groq_model }}               # alternativa Groq (ver README)
+      # Variables del perfil portable (resuelven los {env:...} de opencode.json
+      # y el entorno del MCP circino).
+      MAJIN_OWNER: ${{ github.repository_owner }}
+      MAJIN_REPO: ${{ github.event.repository.name }}
+      MAJIN_GH_USER: ${{ github.actor }}
+      MAJIN_OPERATOR_NAME: ${{ inputs.operator_name }}
+      # Allowlist opcional de actores (vacia por default = solo OWNER dirige)
+      MAJIN_AUTHORIZED: "${{ vars.MAJIN_AUTHORIZED }}"
+
+    steps:
+      # ── Step 0: validacion de auth PREVIA a todo ─────────────────────────
+      # Modos por prioridad (contrato #144): OPENCODE_AUTH -> GROQ_API_KEY ->
+      # anonimo. Credencial presente pero INVALIDA -> falla con instruccion de
+      # reparacion y NO invoca opencode (ci-chain.md seccion 9).
+      - name: "Step 0: Auth check (previo a todo)"
+        id: auth
+        env:
+          OPENCODE_AUTH: ${{ secrets.OPENCODE_AUTH }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          set -euo pipefail
+          mode="anonymous"
+          valid="true"
+          detail=""
+          repair=""
+
+          if [ -n "${OPENCODE_AUTH:-}" ]; then
+            mode="open-code-auth"
+            auth_file="$HOME/.local/share/opencode/auth.json"
+            mkdir -p "$(dirname "$auth_file")"
+            printf '%s' "$OPENCODE_AUTH" > "$auth_file"
+            chmod 600 "$auth_file"
+            if ! jq -e 'type == "object" and (length > 0)' "$auth_file" > /dev/null 2>&1; then
+              valid="false"
+              detail="OPENCODE_AUTH no es un auth.json valido (JSON roto u objeto vacio)."
+            else
+              token="$(jq -r '(.zen.access_token // .zen.key // empty)' "$auth_file")"
+              if [ -n "$token" ]; then
+                code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+                  -H "Authorization: Bearer $token" https://opencode.ai/zen/v1/models || echo 000)"
+                case "$code" in
+                  401|403)
+                    valid="false"
+                    detail="Zen rechazo el token (HTTP $code): credencial expirada o rotada." ;;
+                  200)
+                    detail="Zen OK (HTTP 200)." ;;
+                  *)
+                    # No confirmable (caida de red/endpoint): no se falla en falso.
+                    detail="Zen no confirmable (HTTP $code); validacion estructural OK, se deja correr." ;;
+                esac
+              else
+                detail="auth.json valido pero sin zen.access_token/zen.key; validacion solo estructural."
+              fi
+            fi
+            repair='opencode auth login --provider zen && gh secret set OPENCODE_AUTH < "$HOME/.local/share/opencode/auth.json"'
+          elif [ -n "${GROQ_API_KEY:-}" ]; then
+            mode="groq"
+            code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+              -H "Authorization: Bearer $GROQ_API_KEY" https://api.groq.com/openai/v1/models || echo 000)"
+            case "$code" in
+              401|403)
+                valid="false"
+                detail="Groq rechazo la key (HTTP $code): invalida o revocada." ;;
+              200)
+                detail="Groq OK (HTTP 200)." ;;
+              *)
+                detail="Groq no confirmable (HTTP $code); se deja correr y el run lo diria si falla." ;;
+            esac
+            repair='gh secret set GROQ_API_KEY  # con la key nueva de Mr J'
+          else
+            detail="Sin credencial: modo anonimo (rate-limit por IP de runners; zona gris de ToS asumida por el operador - #144)."
+          fi
+
+          {
+            echo "mode=$mode"
+            echo "valid=$valid"
+            echo "detail=$detail"
+            echo "repair=$repair"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Step 0 — Auth check"
+            echo ""
+            echo "| Campo | Valor |"
+            echo "|-------|-------|"
+            echo "| Modo detectado | \`$mode\` |"
+            echo "| Valido | $valid |"
+            echo "| Detalle | $detail |"
+            if [ "$valid" = "false" ]; then
+              echo "| Reparacion | \`$repair\` |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$valid" = "false" ]; then
+            echo "::error::Credencial $mode presente pero invalida - no se invoca opencode. Reparacion: $repair"
+          fi
+
+      # ── Step 0b: credencial rota -> reporte visible + FAIL ───────────────
+      # ci-chain seccion 9: step summary (arriba) + tabla en bloqueada (Notas
+      # "token expirado") + comentario de reparacion (anti-spam) + NO ejecutar
+      # la etapa + NO remover kairos:ci. Nunca falla silencioso.
+      - name: "Step 0b: Reporte de credencial rota (issue + FAIL)"
+        if: steps.auth.outputs.valid == 'false'
+        env:
+          AUTH_MODE: ${{ steps.auth.outputs.mode }}
+          REPAIR: ${{ steps.auth.outputs.repair }}
+          ISSUE_NUMBER: ${{ inputs.issue_number || github.event.issue.number }}
+          RUN_NUM: ${{ github.run_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess, sys
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          issue = os.environ.get("ISSUE_NUMBER") or ""
+          mode = os.environ.get("AUTH_MODE", "desconocido")
+          repair = os.environ.get("REPAIR", "")
+          run_num = os.environ.get("RUN_NUM", "?")
+          run_url = os.environ.get("RUN_URL", "")
+          marker = "<!-- kairos-auth-repair -->"
+
+          def gh(*args):
+              r = subprocess.run(["gh", "api", *args], capture_output=True, text=True)
+              if r.returncode != 0:
+                  print(f"gh api fallo: {r.stderr.strip()}", file=sys.stderr)
+              return r
+
+          if not issue:
+              print("Sin issue en el evento: solo step summary (ya emitido).")
+              sys.exit(0)
+
+          # 1) localizar la tabla de etapas (ultimo comentario que la contiene)
+          r = gh(f"repos/{repo}/issues/{issue}/comments?per_page=100")
+          try:
+              comments = json.loads(r.stdout or "[]")
+          except json.JSONDecodeError:
+              comments = []
+          header_re = re.compile(r"(?im)^\|\s*etapa\s*\|\s*estado\s*\|")
+          table = None
+          for c in comments:
+              if header_re.search(c.get("body") or ""):
+                  table = c
+
+          def block_table(body: str) -> str:
+              lines = body.split("\n")
+              idx = next((i for i, l in enumerate(lines) if header_re.match(l)), None)
+              if idx is None:
+                  return body
+              i = idx + 1
+              if i < len(lines) and re.match(r"^\s*\|[\s:|-]+\|\s*$", lines[i]):
+                  i += 1  # fila separadora
+              while i < len(lines) and lines[i].lstrip().startswith("|"):
+                  cells = lines[i].split("|")
+                  if len(cells) >= 5 and "done" not in cells[2].lower():
+                      cells[2] = " 🔒 bloqueada "
+                      cells[3] = f" #{run_num} "
+                      cells[4] = f" token {mode} invalido - reparar secret "
+                      lines[i] = "|".join(cells)
+                      return "\n".join(lines)
+                  i += 1
+              return body
+
+          if table:
+              new_body = block_table(table["body"])
+              if new_body != table["body"]:
+                  import tempfile
+                  with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as f:
+                      f.write(new_body)
+                      path = f.name
+                  gh("-X", "PATCH", f"repos/{repo}/issues/comments/{table['id']}", "-F", f"body=@{path}")
+                  print(f"Tabla de etapas actualizada a bloqueada (comment {table['id']}).")
+
+          # 2) comentario de reparacion (anti-spam: solo si el ultimo no lo es ya)
+          last = comments[-1]["body"] if comments else ""
+          if marker in last:
+              print("Aviso de reparacion ya consecutivo - anti-spam, no se comenta.")
+          else:
+              body = (
+                  f"{marker}\n"
+                  f"### 🔒 Auth del worker invalida (run #{run_num})\n\n"
+                  f"Credencial **{mode}** presente pero rechazada: la etapa **no se ejecuto** "
+                  f"y `kairos:ci` queda intacto (la cadena sigue viva). "
+                  f"La tabla de etapas quedo en `🔒 bloqueada` (Notas: token expirado) si existia.\n\n"
+                  f"**Reparacion (Mr J):**\n```bash\n{repair}\n```\n\n"
+                  f"Run: {run_url}\n"
+              )
+              gh(f"repos/{repo}/issues/{issue}/comments", "-f", f"body={body}")
+              print("Comentario de reparacion publicado.")
+          PY
+          exit 1
+
+      # ── Catch-up guard: no duplicar si ya corrio por evento ──────────────
+      - name: "Catch-up guard (schedule)"
+        id: catchup
+        if: github.event_name == 'schedule' || inputs.mode == 'guard-check'
+        run: |
+          set -euo pipefail
+          since="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+          url="repos/${GITHUB_REPOSITORY}/actions/workflows/kairos-worker.yml/runs?created=%3E%3D${since}&per_page=100"
+          count="$(gh api "$url" --jq '[.workflow_runs[] | select(.event != "schedule")] | length')"
+          if [ "${count:-0}" -gt 0 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Catch-up **salta**: ${count} run(s) por evento en las ultimas 24h (no duplicar)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Catch-up **procede**: ningun run por evento en las ultimas 24h." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Checkout
+        if: >-
+          steps.auth.outputs.valid == 'true' &&
+          steps.catchup.outputs.skip != 'true' &&
+          env.MODE == 'chain'
+        uses: actions/checkout@v4
+
+      # ── Sync perfil del worker (versionado central) ──────────────────────
+      # Los consumidores NO copian .opencode/ a mano: se toma del tag
+      # `worker_ref` del repo worker en runtime. Corre DESPUES del Checkout del
+      # consumidor (para pisar la copia vieja que el repo traiga trackeada) y
+      # ANTES de `npm ci` (que vive en .opencode).
+      #
+      # OJO (repo worker PRIVADO): `github.token` esta scoped al repo del
+      # CALLER y NO alcanza otro repo privado, por eso el checkout cross-repo
+      # usa el PAT fine-grained `KAIROS_WORKER_TOKEN` (secret de ORG, contents+
+      # metadata read sobre MajinTechnologies/kairos-worker-poc) via `token:`.
+      # `persist-credentials: false` evita que el PAT quede en .git/config del
+      # repo del consumidor (post-checkout los demas pasos usan github.token).
+      # El repo worker debe ademas permitir el uso de sus reusable workflows
+      # desde el repo del consumidor (Access policy).
+      - name: "Sync perfil worker (checkout kairos @ ${{ inputs.worker_ref }})"
+        if: >-
+          steps.auth.outputs.valid == 'true' &&
+          steps.catchup.outputs.skip != 'true' &&
+          env.MODE == 'chain'
+        uses: actions/checkout@v4
+        with:
+          repository: MajinTechnologies/kairos-worker-poc
+          ref: ${{ inputs.worker_ref }}
+          path: .kairos-profile
+          token: ${{ secrets.KAIROS_WORKER_TOKEN }}
+          persist-credentials: false
+      - name: "Sync perfil worker (.opencode desde el tag)"
+        if: >-
+          steps.auth.outputs.valid == 'true' &&
+          steps.catchup.outputs.skip != 'true' &&
+          env.MODE == 'chain'
+        run: |
+          rm -rf .opencode
+          cp -r .kairos-profile/.opencode .opencode
+          rm -rf .kairos-profile
+
+      - name: Setup Node
+        if: >-
+          steps.auth.outputs.valid == 'true' &&
+          steps.catchup.outputs.skip != 'true' &&
+          env.MODE == 'chain'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: .opencode/package-lock.json
+
+      - name: Instalar opencode (pin)
+        if: >-
+          steps.auth.outputs.valid == 'true' &&
+          steps.catchup.outputs.skip != 'true' &&
+          env.MODE == 'chain'
+        run: npm install -g "opencode-ai@${OPENCODE_VERSION}"
+
+      - name: npm ci (.opencode — deps del plugin y del MCP github)
+        if: >-
+          steps.auth.outputs.valid == 'true' &&
+          steps.catchup.outputs.skip != 'true' &&
+          env.MODE == 'chain'
+        run: npm ci
+        working-directory: .opencode
+
+      # Resuelve los {env:...} del perfil portable .opencode/opencode.json.
+      - name: Resolver servidores MCP (github + circino)
+        if: >-
+          steps.auth.outputs.valid == 'true' &&
+          steps.catchup.outputs.skip != 'true' &&
+          env.MODE == 'chain'
+        run: |
+          set -uo pipefail
+          gh_mcp="$GITHUB_WORKSPACE/.opencode/node_modules/@modelcontextprotocol/server-github/dist/index.js"
+          echo "GITHUB_MCP_SERVER=$gh_mcp" >> "$GITHUB_ENV"
+          if [ ! -f "$gh_mcp" ]; then
+            echo "WARNING: MCP github no encontrado (npm ci fallo?)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          tmp="$(mktemp -d)"
+          vsix="https://marketplace.visualstudio.com/_apis/public/gallery/publishers/majintech/vsextensions/vscode-circino/latest/vspackage"
+          if curl -fsSL --max-time 90 "$vsix" -o "$tmp/circino.vsix" \
+             && unzip -o -q "$tmp/circino.vsix" "extension/dist/mcp-server.js" -d "$tmp" \
+             && [ -f "$tmp/extension/dist/mcp-server.js" ]; then
+            echo "CIRCINO_MCP_SERVER=$tmp/extension/dist/mcp-server.js" >> "$GITHUB_ENV"
+            echo "Circino MCP: extension publicada (dist/mcp-server.js)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            # Fallback determinista: el MCP arranca y muere con mensaje claro.
+            stub="$tmp/circino-unavailable.js"
+            printf '%s\n' "console.error('circino MCP no disponible en este run');" "process.exit(1);" > "$stub"
+            echo "CIRCINO_MCP_SERVER=$stub" >> "$GITHUB_ENV"
+            echo "Circino MCP NO disponible (descarga del vsix fallo): el worker usa gh CLI + MCP github." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Run worker (modo chain)
+        if: >-
+          steps.auth.outputs.valid == 'true' &&
+          steps.catchup.outputs.skip != 'true' &&
+          env.MODE == 'chain'
+        env:
+          AUTH_MODE: ${{ steps.auth.outputs.mode }}
+          ISSUE_NUMBER: ${{ inputs.issue_number || github.event.issue.number }}
+          EVENT_NAME: ${{ inputs.event_name }}
+        run: |
+          set -euo pipefail
+
+          # Modelo segun modo de auth (contrato #144). Anonimo -> modelo free
+          # de Zen: si opencode exige login igual, el run falla a la vista.
+          model_args=(--model "$OPENCODE_MODEL")
+          if [ "$AUTH_MODE" = "groq" ]; then
+            model_args=(--model "$GROQ_MODEL")
+          fi
+
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if [ -n "${ISSUE_NUMBER:-}" ]; then
+            issue_ctx="Issue objetivo: #${ISSUE_NUMBER} (label kairos:ci activo, disparo issues:labeled)."
+          else
+            issue_ctx="El evento no trae issue: busca issues ABIERTOS con label kairos:ci (gh issue list --label kairos:ci --state open --json number,title) y trabaja sobre el primero. Si no hay ninguno, termina en silencio (solo \$GITHUB_STEP_SUMMARY)."
+          fi
+
+          prompt=$(cat <<EOF
+          Eres el worker de CI de Kairos en una sesion atomica: sin memoria previa, el issue es tu memoria.
+          El protocolo completo (ci-chain.md) esta cargado en tus instrucciones — seguelo al pie de la letra.
+
+          Contexto de este run:
+          - Repo: ${GITHUB_REPOSITORY}
+          - Run: #${GITHUB_RUN_NUMBER} — ${run_url}
+          - Evento: ${EVENT_NAME}
+          - Modo auth (ya validado en el step 0): ${AUTH_MODE}
+          - ${issue_ctx}
+
+          Operacion:
+          1. Lee la tabla de etapas del issue (comentario fijo o ultimo). Reclama SOLO la primera etapa no done (claim = en curso + run#). Etapa en curso de un run fallido se rehace.
+          2. Ejecuta UNA etapa y cerrala: reporte + tabla done con run#. Sin salto de etapas.
+          3. Anti-deriva: anclas a paths y lineas REALES verificadas contra el repo actual; cada resumen enlaza el comentario anterior.
+          4. Anti-spam: sin nada reclamable o con comentario DONE local -> silencio, solo \$GITHUB_STEP_SUMMARY.
+          5. Comentarios via gh CLI (GH_TOKEN ya esta en el entorno), MCP github o MCP circino.
+          6. Etapa 3: crea rama kairos/<issue-num>-<slug>, commits convencionales en la rama (sin force-push), push y abre PR con 'Closes #<issue>' en el body. NO mergear. Tests rojos -> reporte de fallos y STOP.
+          7. No agregues labels status:* y no remuevas kairos:ci salvo cierre (post-merge) de etapa 4 segun protocolo.
+          EOF
+          )
+
+          if opencode run --auto --print-logs "${model_args[@]}" --agent kairos-worker "$prompt"; then
+            echo "Worker termino — verificar los comentarios del issue." >> "$GITHUB_STEP_SUMMARY"
+          else
+            status=$?
+            echo "opencode run fallo (exit ${status}) — ver logs del step." >> "$GITHUB_STEP_SUMMARY"
+            exit "$status"
+          fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INSTALACION EN UN REPO CONSUMIDOR (workflow delgado)
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. Copiar SOLO el archivo `.github/workflows/kairos-worker.yml` (delgado) al
+#    repo destino.
+# 2. Crear los labels `kairos:ci` y `status:done`.
+# 3. (Opcional) Cargar los secrets `OPENCODE_AUTH` y/o `GROQ_API_KEY`.
+#    Requerido si el repo worker sigue PRIVADO: `KAIROS_WORKER_TOKEN` (PAT
+#    fine-grained con contents+metadata read sobre kairos-worker-poc; si es
+#    secret de ORG se hereda solo y el consumidor no carga nada).
+# 4. Ajustar `MAJIN_OPERATOR_NAME` en el workflow delgado (input operator_name).
+#
+# NOTA: Ya no se copia el perfil .opencode/ manualmente: el workflow delgado lo
+# sincroniza en runtime desde el tag. Para actualizar el worker, bump del ref
+# kairos/vX.Y.Z (2 lugares: el `uses:` y el input `worker_ref`).
