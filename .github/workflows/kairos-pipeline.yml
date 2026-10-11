@@ -1,4 +1,4 @@
-# Pipeline reutilizable del worker de CI de Kairos (MajinTechnologies/kairos-ci).
+# Pipeline reutilizable del worker de CI de Kairos (MajinTechnologies/kairos-ci) [v1.0.1-bump]
 #
 # Versionado central: los repos consumidores invocan este workflow via
 #   uses: MajinTechnologies/kairos-ci/.github/workflows/kairos-pipeline.yml@vX.Y.Z
@@ -109,7 +109,7 @@ jobs:
       MAJIN_AUTHORIZED: "${{ vars.MAJIN_AUTHORIZED }}"
 
     steps:
-      # ── Step 0: validacion de auth PREVIA a todo ─────────────────────────
+      # Ã”Ã¶Ã‡Ã”Ã¶Ã‡ Step 0: validacion de auth PREVIA a todo Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡
       # Modos por prioridad (contrato #144): OPENCODE_AUTH -> GROQ_API_KEY ->
       # anonimo. Credencial presente pero INVALIDA -> falla con instruccion de
       # reparacion y NO invoca opencode (ci-chain.md seccion 9).
@@ -180,7 +180,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           {
-            echo "## Step 0 — Auth check"
+            echo "## Step 0 Ã”Ã‡Ã¶ Auth check"
             echo ""
             echo "| Campo | Valor |"
             echo "|-------|-------|"
@@ -196,7 +196,7 @@ jobs:
             echo "::error::Credencial $mode presente pero invalida - no se invoca opencode. Reparacion: $repair"
           fi
 
-      # ── Step 0b: credencial rota -> reporte visible + FAIL ───────────────
+      # Ã”Ã¶Ã‡Ã”Ã¶Ã‡ Step 0b: credencial rota -> reporte visible + FAIL Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡
       # ci-chain seccion 9: step summary (arriba) + tabla en bloqueada (Notas
       # "token expirado") + comentario de reparacion (anti-spam) + NO ejecutar
       # la etapa + NO remover kairos:ci. Nunca falla silencioso.
@@ -253,7 +253,7 @@ jobs:
               while i < len(lines) and lines[i].lstrip().startswith("|"):
                   cells = lines[i].split("|")
                   if len(cells) >= 5 and "done" not in cells[2].lower():
-                      cells[2] = " 🔒 bloqueada "
+                      cells[2] = " Â­Æ’Ã¶Ã† bloqueada "
                       cells[3] = f" #{run_num} "
                       cells[4] = f" token {mode} invalido - reparar secret "
                       lines[i] = "|".join(cells)
@@ -278,10 +278,10 @@ jobs:
           else:
               body = (
                   f"{marker}\n"
-                  f"### 🔒 Auth del worker invalida (run #{run_num})\n\n"
+                  f"### Â­Æ’Ã¶Ã† Auth del worker invalida (run #{run_num})\n\n"
                   f"Credencial **{mode}** presente pero rechazada: la etapa **no se ejecuto** "
                   f"y `kairos:ci` queda intacto (la cadena sigue viva). "
-                  f"La tabla de etapas quedo en `🔒 bloqueada` (Notas: token expirado) si existia.\n\n"
+                  f"La tabla de etapas quedo en `Â­Æ’Ã¶Ã† bloqueada` (Notas: token expirado) si existia.\n\n"
                   f"**Reparacion (Mr J):**\n```bash\n{repair}\n```\n\n"
                   f"Run: {run_url}\n"
               )
@@ -290,7 +290,7 @@ jobs:
           PY
           exit 1
 
-      # ── Catch-up guard: no duplicar si ya corrio por evento ──────────────
+      # Ã”Ã¶Ã‡Ã”Ã¶Ã‡ Catch-up guard: no duplicar si ya corrio por evento Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡
       - name: "Catch-up guard (schedule)"
         id: catchup
         if: github.event_name == 'schedule' || inputs.mode == 'guard-check'
@@ -314,7 +314,7 @@ jobs:
           env.MODE == 'chain'
         uses: actions/checkout@v4
 
-      # ── Sync perfil del worker (versionado central) ──────────────────────
+      # Ã”Ã¶Ã‡Ã”Ã¶Ã‡ Sync perfil del worker (versionado central) Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡
       # Los consumidores NO copian .opencode/ a mano: se toma del tag
       # `worker_ref` del repo worker en runtime. Corre DESPUES del Checkout del
       # consumidor (para pisar la copia vieja que el repo traiga trackeada) y
@@ -368,7 +368,7 @@ jobs:
           env.MODE == 'chain'
         run: npm install -g "opencode-ai@${OPENCODE_VERSION}"
 
-      - name: npm ci (.opencode — deps del plugin y del MCP github)
+      - name: npm ci (.opencode Ã”Ã‡Ã¶ deps del plugin y del MCP github)
         if: >-
           steps.auth.outputs.valid == 'true' &&
           steps.catchup.outputs.skip != 'true' &&
@@ -433,11 +433,11 @@ jobs:
 
           prompt=$(cat <<EOF
           Eres el worker de CI de Kairos en una sesion atomica: sin memoria previa, el issue es tu memoria.
-          El protocolo completo (ci-chain.md) esta cargado en tus instrucciones — seguelo al pie de la letra.
+          El protocolo completo (ci-chain.md) esta cargado en tus instrucciones Ã”Ã‡Ã¶ seguelo al pie de la letra.
 
           Contexto de este run:
           - Repo: ${GITHUB_REPOSITORY}
-          - Run: #${GITHUB_RUN_NUMBER} — ${run_url}
+          - Run: #${GITHUB_RUN_NUMBER} Ã”Ã‡Ã¶ ${run_url}
           - Evento: ${EVENT_NAME}
           - Modo auth (ya validado en el step 0): ${AUTH_MODE}
           - ${issue_ctx}
@@ -454,16 +454,16 @@ jobs:
           )
 
           if opencode run --auto --print-logs "${model_args[@]}" --agent kairos-worker "$prompt"; then
-            echo "Worker termino — verificar los comentarios del issue." >> "$GITHUB_STEP_SUMMARY"
+            echo "Worker termino Ã”Ã‡Ã¶ verificar los comentarios del issue." >> "$GITHUB_STEP_SUMMARY"
           else
             status=$?
-            echo "opencode run fallo (exit ${status}) — ver logs del step." >> "$GITHUB_STEP_SUMMARY"
+            echo "opencode run fallo (exit ${status}) Ã”Ã‡Ã¶ ver logs del step." >> "$GITHUB_STEP_SUMMARY"
             exit "$status"
           fi
 
-# ─────────────────────────────────────────────────────────────────────────────
+# Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡
 # INSTALACION EN UN REPO CONSUMIDOR (workflow delgado)
-# ─────────────────────────────────────────────────────────────────────────────
+# Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡
 # 1. Copiar SOLO el archivo `.github/workflows/kairos-worker.yml` (delgado) al
 #    repo destino.
 # 2. Crear los labels `kairos:ci` y `status:done`.
