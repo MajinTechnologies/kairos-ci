@@ -1,4 +1,4 @@
-# Pipeline reutilizable del worker de CI de Kairos (MajinTechnologies/kairos-ci) [v1.0.1-bump]
+# Pipeline reutilizable del worker de CI de Kairos (MajinTechnologies/kairos-ci) [v1.2.0]
 #
 # Versionado central: los repos consumidores invocan este workflow via
 #   uses: MajinTechnologies/kairos-ci/.github/workflows/kairos-pipeline.yml@vX.Y.Z
@@ -7,6 +7,12 @@
 # desde el tag `worker_ref`. Para actualizar el worker, el consumidor bumpea el
 # ref del `uses:` y el input `worker_ref` (2 lugares).
 #
+# v1.2.0 — SIN seleccion de issues: el caller (job `select` + matriz en el job
+# `work`) elige y reclama los issues (labels `kairos:ci` -> `kairos:in-progress`)
+# y llama a este reusable UNA VEZ POR ISSUE con `issue_number`. Aca se corre la
+# cadena de 4 etapas SOLO sobre ese issue. BREAKING para callers v1.1.x (que
+# esperaban que el LLM eligiera el issue cuando `issue_number` venia vacio).
+#
 # Diseno: Majin-Circino#144 (comentarios "Diseno: Cadena de sesiones atomicas"
 # y "Contrato de secrets") + Majin-Kairos/protocols/ci-chain.md.
 #
@@ -14,8 +20,11 @@
 #   - Solo GITHUB_TOKEN de Actions (los eventos generados con el token
 #     automatico de Actions NO re-dispara workflows) -> los comentarios/labels
 #     que ponga el worker no generan runs nuevos.
-#   - Disparo exclusivo por label `kairos:ci` (nunca por status:*).
-#   - concurrency group serializa runs (una etapa a la vez).
+#   - Disparo exclusivo por label `kairos:ci` (nunca por status:*): el claim
+#     del caller quita `kairos:ci` y pone `kairos:in-progress` con ese token.
+#   - `concurrency` vive SOLO en el caller (job `select` con group
+#     `kairos-select` + job `work` con group `kairos-issue-<n>`). Este
+#     workflow NO declara `concurrency` (PITFALL: ci-chain.md seccion 13.5).
 #   - timeout de job.
 #
 # NOTA reusable workflow:
@@ -36,7 +45,7 @@ on:
         required: true
         type: string
       issue_number:
-        description: "Numero de issue objetivo (vacio en schedule/manual sin issue)"
+        description: "Numero de issue objetivo (obligatorio en modo chain: el caller lo selecciona y reclama via labels; vacio solo en modos smoke)"
         required: false
         type: string
       event_name:
@@ -68,7 +77,7 @@ on:
         description: "Tag del worker desde el que se sincroniza el perfil .opencode/"
         required: false
         type: string
-        default: "kairos/v1.0.1"
+        default: "kairos/v1.2.0"
     secrets:
       OPENCODE_AUTH:
         description: "JSON de ~/.local/share/opencode/auth.json (Zen, free tier)"
@@ -109,7 +118,7 @@ jobs:
       MAJIN_AUTHORIZED: "${{ vars.MAJIN_AUTHORIZED }}"
 
     steps:
-      # Ã”Ã¶Ã‡Ã”Ã¶Ã‡ Step 0: validacion de auth PREVIA a todo Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡
+      # ── Step 0: validacion de auth PREVIA a todo ─────────────────────────
       # Modos por prioridad (contrato #144): OPENCODE_AUTH -> GROQ_API_KEY ->
       # anonimo. Credencial presente pero INVALIDA -> falla con instruccion de
       # reparacion y NO invoca opencode (ci-chain.md seccion 9).
@@ -180,7 +189,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           {
-            echo "## Step 0 Ã”Ã‡Ã¶ Auth check"
+            echo "## Step 0 — Auth check"
             echo ""
             echo "| Campo | Valor |"
             echo "|-------|-------|"
@@ -196,7 +205,7 @@ jobs:
             echo "::error::Credencial $mode presente pero invalida - no se invoca opencode. Reparacion: $repair"
           fi
 
-      # Ã”Ã¶Ã‡Ã”Ã¶Ã‡ Step 0b: credencial rota -> reporte visible + FAIL Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡
+      # ── Step 0b: credencial rota -> reporte visible + FAIL ───────────────
       # ci-chain seccion 9: step summary (arriba) + tabla en bloqueada (Notas
       # "token expirado") + comentario de reparacion (anti-spam) + NO ejecutar
       # la etapa + NO remover kairos:ci. Nunca falla silencioso.
@@ -253,7 +262,7 @@ jobs:
               while i < len(lines) and lines[i].lstrip().startswith("|"):
                   cells = lines[i].split("|")
                   if len(cells) >= 5 and "done" not in cells[2].lower():
-                      cells[2] = " Â­Æ’Ã¶Ã† bloqueada "
+                      cells[2] = " 🔒 bloqueada "
                       cells[3] = f" #{run_num} "
                       cells[4] = f" token {mode} invalido - reparar secret "
                       lines[i] = "|".join(cells)
@@ -278,10 +287,10 @@ jobs:
           else:
               body = (
                   f"{marker}\n"
-                  f"### Â­Æ’Ã¶Ã† Auth del worker invalida (run #{run_num})\n\n"
+                  f"### 🔒 Auth del worker invalida (run #{run_num})\n\n"
                   f"Credencial **{mode}** presente pero rechazada: la etapa **no se ejecuto** "
                   f"y `kairos:ci` queda intacto (la cadena sigue viva). "
-                  f"La tabla de etapas quedo en `Â­Æ’Ã¶Ã† bloqueada` (Notas: token expirado) si existia.\n\n"
+                  f"La tabla de etapas quedo en `🔒 bloqueada` (Notas: token expirado) si existia.\n\n"
                   f"**Reparacion (Mr J):**\n```bash\n{repair}\n```\n\n"
                   f"Run: {run_url}\n"
               )
@@ -290,7 +299,7 @@ jobs:
           PY
           exit 1
 
-      # Ã”Ã¶Ã‡Ã”Ã¶Ã‡ Catch-up guard: no duplicar si ya corrio por evento Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡
+      # ── Catch-up guard: no duplicar si ya corrio por evento ──────────────
       - name: "Catch-up guard (schedule)"
         id: catchup
         if: github.event_name == 'schedule' || inputs.mode == 'guard-check'
@@ -314,7 +323,7 @@ jobs:
           env.MODE == 'chain'
         uses: actions/checkout@v4
 
-      # Ã”Ã¶Ã‡Ã”Ã¶Ã‡ Sync perfil del worker (versionado central) Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡
+      # ── Sync perfil del worker (versionado central) ──────────────────────
       # Los consumidores NO copian .opencode/ a mano: se toma del tag
       # `worker_ref` del repo worker en runtime. Corre DESPUES del Checkout del
       # consumidor (para pisar la copia vieja que el repo traiga trackeada) y
@@ -368,7 +377,7 @@ jobs:
           env.MODE == 'chain'
         run: npm install -g "opencode-ai@${OPENCODE_VERSION}"
 
-      - name: npm ci (.opencode Ã”Ã‡Ã¶ deps del plugin y del MCP github)
+      - name: npm ci (.opencode — deps del plugin y del MCP github)
         if: >-
           steps.auth.outputs.valid == 'true' &&
           steps.catchup.outputs.skip != 'true' &&
@@ -425,19 +434,23 @@ jobs:
           fi
 
           run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          if [ -n "${ISSUE_NUMBER:-}" ]; then
-            issue_ctx="Issue objetivo: #${ISSUE_NUMBER} (label kairos:ci activo, disparo issues:labeled)."
-          else
-            issue_ctx="El evento no trae issue: busca issues ABIERTOS con label kairos:ci (gh issue list --label kairos:ci --state open --json number,title) y trabaja sobre el primero. Si no hay ninguno, termina en silencio (solo \$GITHUB_STEP_SUMMARY)."
+          # El caller (job `select`) selecciona y reclama el issue ANTES de
+          # invocar este reusable: aca NO hay seleccion (v1.2.0). Si el modo es
+          # chain y no llego `issue_number`, es un misconfig del caller ->
+          # silencio con step summary (anti-spam).
+          if [ -z "${ISSUE_NUMBER:-}" ]; then
+            echo "Modo chain sin \`issue_number\`: la seleccion/reclaim vive en el caller (job \`select\`); no hay nada que hacer en este run." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
+          issue_ctx="Issue objetivo: #${ISSUE_NUMBER} (reclamado por el job \`select\` del caller: label kairos:in-progress activo). Trabaja SOLO sobre ese issue: NO busques ni selecciones otros issues."
 
           prompt=$(cat <<EOF
           Eres el worker de CI de Kairos en una sesion atomica: sin memoria previa, el issue es tu memoria.
-          El protocolo completo (ci-chain.md) esta cargado en tus instrucciones Ã”Ã‡Ã¶ seguelo al pie de la letra.
+          El protocolo completo (ci-chain.md) esta cargado en tus instrucciones — seguelo al pie de la letra.
 
           Contexto de este run:
           - Repo: ${GITHUB_REPOSITORY}
-          - Run: #${GITHUB_RUN_NUMBER} Ã”Ã‡Ã¶ ${run_url}
+          - Run: #${GITHUB_RUN_NUMBER} — ${run_url}
           - Evento: ${EVENT_NAME}
           - Modo auth (ya validado en el step 0): ${AUTH_MODE}
           - ${issue_ctx}
@@ -454,24 +467,30 @@ jobs:
           )
 
           if opencode run --auto --print-logs "${model_args[@]}" --agent kairos-worker "$prompt"; then
-            echo "Worker termino Ã”Ã‡Ã¶ verificar los comentarios del issue." >> "$GITHUB_STEP_SUMMARY"
+            echo "Worker termino — verificar los comentarios del issue." >> "$GITHUB_STEP_SUMMARY"
           else
             status=$?
-            echo "opencode run fallo (exit ${status}) Ã”Ã‡Ã¶ ver logs del step." >> "$GITHUB_STEP_SUMMARY"
+            echo "opencode run fallo (exit ${status}) — ver logs del step." >> "$GITHUB_STEP_SUMMARY"
             exit "$status"
           fi
 
-# Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡
+# ─────────────────────────────────────────────────────────────────────────────
 # INSTALACION EN UN REPO CONSUMIDOR (workflow delgado)
-# Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡Ã”Ã¶Ã‡
+# ─────────────────────────────────────────────────────────────────────────────
 # 1. Copiar SOLO el archivo `.github/workflows/kairos-worker.yml` (delgado) al
-#    repo destino.
-# 2. Crear los labels `kairos:ci` y `status:done`.
+#    repo destino. Ese caller trae el job `select` (seleccion + claim de issues
+#    con `gh`) y el job `work` (matriz 1 job por issue, concurrency por issue)
+#    que invoca ESTE reusable.
+# 2. Crear los labels `kairos:ci` y `status:done` (`kairos:in-progress` lo
+#    auto-crea el select en cada run).
 # 3. (Opcional) Cargar los secrets `OPENCODE_AUTH` y/o `GROQ_API_KEY`.
 #    Requerido si el repo worker sigue PRIVADO: `KAIROS_WORKER_TOKEN` (PAT
 #    fine-grained con contents+metadata read sobre kairos-worker-poc; si es
 #    secret de ORG se hereda solo y el consumidor no carga nada).
 # 4. Ajustar `MAJIN_OPERATOR_NAME` en el workflow delgado (input operator_name).
+# 5. (Opcional) Var de repo `KAIROS_MAX_ISSUES`: cap de issues reclamados por
+#    select (-1 = todos, N = primeros N). NO registrarla para tomar el default
+#    1 (el default vive en el YAML del caller).
 #
 # NOTA: Ya no se copia el perfil .opencode/ manualmente: el workflow delgado lo
 # sincroniza en runtime desde el tag. Para actualizar el worker, bump del ref
