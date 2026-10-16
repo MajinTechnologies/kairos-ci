@@ -88,8 +88,9 @@ jobs:
 - Anti-loop: the claim/release label mutations use the Actions `GITHUB_TOKEN`, which
   does not re-trigger workflows; trigger stays exclusive to the `kairos:ci`
   label (never `status:*`).
-- To pick up a new worker version, bump the tag in the `uses:` ref and the
-  `worker_ref` input (2 places).
+- To pick up a new worker version, bump both refs (distinct namespaces): the
+  `uses:` tag of **this** public repo (`vX.Y.Z`) and the `worker_ref` input
+  (the private profile tag `kairos/vX.Y.Z`).
 
 ## Versioning
 
