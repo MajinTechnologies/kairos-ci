@@ -21,15 +21,16 @@ the worker while keeping the profile private.
 ## Usage (consumer repo)
 
 Copy the thin caller `.github/workflows/kairos-worker.yml` into the consumer
-repo and point the `work` job at this public reusable workflow. Since `v1.2.0`
-the caller owns **selection + parallelism** (the reusable receives one issue
-per invocation and never declares `concurrency`):
+repo and point the `work` job at this public reusable workflow. Since `v1.3.0`
+the caller owns **selection + parallelism + claim release** (the reusable
+receives one issue per invocation and never declares `concurrency`):
 
 ```yaml
 jobs:
-  # serial: lists open issues labeled `kairos:ci`, applies the
-  # KAIROS_MAX_ISSUES cap (default 1, -1 = all) and claims them
-  # (`kairos:ci` -> `kairos:in-progress`) using only `gh`
+  # serial: lists OPEN issues labeled `kairos:ci` and WITHOUT
+  # `kairos:in-progress`, applies the KAIROS_MAX_ISSUES cap (default 1,
+  # -1 = all) and claims them by ADDING `kairos:in-progress` only
+  # (`kairos:ci` is the operator kill-switch: never touched) using only `gh`
   select:
     runs-on: ubuntu-latest
     concurrency:
@@ -50,26 +51,41 @@ jobs:
     concurrency:
       group: kairos-issue-${{ matrix.issue }}
       cancel-in-progress: false
-    uses: MajinTechnologies/kairos-ci/.github/workflows/kairos-pipeline.yml@v1.2.0
+    uses: MajinTechnologies/kairos-ci/.github/workflows/kairos-pipeline.yml@v1.3.0
     with:
       mode: chain
       issue_number: ${{ matrix.issue != 0 && format('{0}', matrix.issue) || '' }}
-      worker_ref: kairos/v1.2.0   # tag of the PRIVATE profile in kairos-worker-poc
+      worker_ref: kairos/v1.3.0   # tag of the PRIVATE profile in kairos-worker-poc
     secrets:
       OPENCODE_AUTH: ${{ secrets.OPENCODE_AUTH }}       # optional
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}         # optional
       KAIROS_WORKER_TOKEN: ${{ secrets.KAIROS_WORKER_TOKEN }}  # required
+
+  # always: releases the claim (removes `kairos:in-progress`); runs even if
+  # `work` fails or never starts, so the next cron can retry the issue
+  release:
+    needs: [select, work]
+    if: always() && needs.select.outputs.count != '0'
+    strategy:
+      matrix:
+        issue: ${{ fromJSON(needs.select.outputs.issues) }}
+    # ...steps: gh issue edit --remove-label kairos:in-progress...
 ```
 
-- The full working caller (including the `select` steps) ships in
-  `kairos-worker-poc @ kairos/v1.2.0` — copy it from there.
+- The full working caller (including the `select`/`release` steps) ships in
+  `kairos-worker-poc` at the tag `kairos/v1.3.0`.
+- Claim model: the caller **only adds** `kairos:in-progress`. The `kairos:ci`
+  label is the **operator's order / kill-switch** and the machine never
+  adds/removes it; a **closed** issue is the chain terminator (`state:open`).
+- The `release` job (`if: always()`) removes `kairos:in-progress` at the end of
+  every run, so a dead `work` job does not block the next cron retry.
 - `KAIROS_WORKER_TOKEN` — PAT (org secret) with `contents:read` + `metadata:read`
   on `MajinTechnologies/kairos-worker-poc`. Used to check out the private
   `.opencode/` profile at `worker_ref`.
 - `KAIROS_MAX_ISSUES` — optional **repository variable** (read by the caller,
   not by this reusable): `-1` = all eligible issues, `N` = first `N`
   (default `1` when unset — do not register the variable to keep the default).
-- Anti-loop: the claim mutates labels with the Actions `GITHUB_TOKEN`, which
+- Anti-loop: the claim/release label mutations use the Actions `GITHUB_TOKEN`, which
   does not re-trigger workflows; trigger stays exclusive to the `kairos:ci`
   label (never `status:*`).
 - To pick up a new worker version, bump the tag in the `uses:` ref and the
@@ -77,7 +93,7 @@ jobs:
 
 ## Versioning
 
-Semantic versioning with annotated tags. Current: `v1.2.0` (mirrors the
-reusable workflow from `kairos-worker-poc @ kairos/v1.2.0`; BREAKING: the
-caller must select/claim issues and pass `issue_number` — the LLM no longer
-picks issues).
+Semantic versioning with annotated tags. Current: `v1.3.0` (mirrors the
+reusable workflow from `kairos-worker-poc @ kairos/v1.3.0`; BREAKING: corrected
+claim model — the caller only ADDS `kairos:in-progress`, never touches
+`kairos:ci`, and releases the claim with an `always()` job).
