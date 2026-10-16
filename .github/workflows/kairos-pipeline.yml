@@ -1,4 +1,4 @@
-# Pipeline reutilizable del worker de CI de Kairos (MajinTechnologies/kairos-ci) [v1.2.0]
+# Pipeline reutilizable del worker de CI de Kairos (MajinTechnologies/kairos-ci) [v1.3.0]
 #
 # Versionado central: los repos consumidores invocan este workflow via
 #   uses: MajinTechnologies/kairos-ci/.github/workflows/kairos-pipeline.yml@vX.Y.Z
@@ -7,25 +7,30 @@
 # desde el tag `worker_ref`. Para actualizar el worker, el consumidor bumpea el
 # ref del `uses:` y el input `worker_ref` (2 lugares).
 #
-# v1.2.0 — SIN seleccion de issues: el caller (job `select` + matriz en el job
-# `work`) elige y reclama los issues (labels `kairos:ci` -> `kairos:in-progress`)
-# y llama a este reusable UNA VEZ POR ISSUE con `issue_number`. Aca se corre la
-# cadena de 4 etapas SOLO sobre ese issue. BREAKING para callers v1.1.x (que
-# esperaban que el LLM eligiera el issue cuando `issue_number` venia vacio).
+# v1.3.0 — SIN seleccion de issues y SIN labels: el caller (job `select` +
+# matriz en `work` + job `release`) lista los issues (abiertos + `kairos:ci`
+# - `kairos:in-progress`), hace el CLAIM agregando `kairos:in-progress` (NUNCA
+# toca `kairos:ci`, que es la orden/kill-switch del operador) y llama a este
+# reusable UNA VEZ POR ISSUE con `issue_number`. Aca se corre la cadena de 4
+# etapas SOLO sobre ese issue; el ciclo de vida del label es 100% del YAML.
+# BREAKING para callers v1.2.x (que hacian swap `kairos:ci` -> `kairos:in-progress`).
 #
 # Diseno: Majin-Circino#144 (comentarios "Diseno: Cadena de sesiones atomicas"
 # y "Contrato de secrets") + Majin-Kairos/protocols/ci-chain.md.
 #
 # Anti-loop:
 #   - Solo GITHUB_TOKEN de Actions (los eventos generados con el token
-#     automatico de Actions NO re-dispara workflows) -> los comentarios/labels
-#     que ponga el worker no generan runs nuevos.
-#   - Disparo exclusivo por label `kairos:ci` (nunca por status:*): el claim
-#     del caller quita `kairos:ci` y pone `kairos:in-progress` con ese token.
+#     automatico de Actions NO re-dispara workflows) -> la mutacion de labels
+#     del caller (claim/release) no genera runs nuevos.
+#   - Disparo exclusivo por label `kairos:ci` (nunca por status:*).
 #   - `concurrency` vive SOLO en el caller (job `select` con group
 #     `kairos-select` + job `work` con group `kairos-issue-<n>`). Este
 #     workflow NO declara `concurrency` (PITFALL: ci-chain.md seccion 13.5).
 #   - timeout de job.
+#
+# El catch-up guard NO vive aca: se evalua en el `select` del caller ANTES del
+# claim (cierra el hallazgo de Caronte #2: antes corria despues del claim y
+# podia dejar `kairos:in-progress` sin trabajo).
 #
 # NOTA reusable workflow:
 #   - Al ser llamado, el `github` context es el del CALLER (repo/evento/actor
@@ -77,7 +82,7 @@ on:
         description: "Tag del worker desde el que se sincroniza el perfil .opencode/"
         required: false
         type: string
-        default: "kairos/v1.2.0"
+        default: "kairos/v1.3.0"
     secrets:
       OPENCODE_AUTH:
         description: "JSON de ~/.local/share/opencode/auth.json (Zen, free tier)"
@@ -299,27 +304,11 @@ jobs:
           PY
           exit 1
 
-      # ── Catch-up guard: no duplicar si ya corrio por evento ──────────────
-      - name: "Catch-up guard (schedule)"
-        id: catchup
-        if: github.event_name == 'schedule' || inputs.mode == 'guard-check'
-        run: |
-          set -euo pipefail
-          since="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
-          url="repos/${GITHUB_REPOSITORY}/actions/workflows/kairos-worker.yml/runs?created=%3E%3D${since}&per_page=100"
-          count="$(gh api "$url" --jq '[.workflow_runs[] | select(.event != "schedule")] | length')"
-          if [ "${count:-0}" -gt 0 ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Catch-up **salta**: ${count} run(s) por evento en las ultimas 24h (no duplicar)." >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "Catch-up **procede**: ningun run por evento en las ultimas 24h." >> "$GITHUB_STEP_SUMMARY"
-          fi
-
+      # NOTA: el catch-up guard NO vive aca. Se evalua en el `select` del
+      # caller, ANTES del claim (asi no queda `kairos:in-progress` sin trabajo).
       - name: Checkout
         if: >-
           steps.auth.outputs.valid == 'true' &&
-          steps.catchup.outputs.skip != 'true' &&
           env.MODE == 'chain'
         uses: actions/checkout@v4
 
@@ -340,7 +329,6 @@ jobs:
       - name: "Sync perfil worker (checkout kairos @ ${{ inputs.worker_ref }})"
         if: >-
           steps.auth.outputs.valid == 'true' &&
-          steps.catchup.outputs.skip != 'true' &&
           env.MODE == 'chain'
         uses: actions/checkout@v4
         with:
@@ -352,7 +340,6 @@ jobs:
       - name: "Sync perfil worker (.opencode desde el tag)"
         if: >-
           steps.auth.outputs.valid == 'true' &&
-          steps.catchup.outputs.skip != 'true' &&
           env.MODE == 'chain'
         run: |
           rm -rf .opencode
@@ -362,7 +349,6 @@ jobs:
       - name: Setup Node
         if: >-
           steps.auth.outputs.valid == 'true' &&
-          steps.catchup.outputs.skip != 'true' &&
           env.MODE == 'chain'
         uses: actions/setup-node@v4
         with:
@@ -373,14 +359,12 @@ jobs:
       - name: Instalar opencode (pin)
         if: >-
           steps.auth.outputs.valid == 'true' &&
-          steps.catchup.outputs.skip != 'true' &&
           env.MODE == 'chain'
         run: npm install -g "opencode-ai@${OPENCODE_VERSION}"
 
       - name: npm ci (.opencode — deps del plugin y del MCP github)
         if: >-
           steps.auth.outputs.valid == 'true' &&
-          steps.catchup.outputs.skip != 'true' &&
           env.MODE == 'chain'
         run: npm ci
         working-directory: .opencode
@@ -389,7 +373,6 @@ jobs:
       - name: Resolver servidores MCP (github + circino)
         if: >-
           steps.auth.outputs.valid == 'true' &&
-          steps.catchup.outputs.skip != 'true' &&
           env.MODE == 'chain'
         run: |
           set -uo pipefail
@@ -417,7 +400,6 @@ jobs:
       - name: Run worker (modo chain)
         if: >-
           steps.auth.outputs.valid == 'true' &&
-          steps.catchup.outputs.skip != 'true' &&
           env.MODE == 'chain'
         env:
           AUTH_MODE: ${{ steps.auth.outputs.mode }}
@@ -435,7 +417,7 @@ jobs:
 
           run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           # El caller (job `select`) selecciona y reclama el issue ANTES de
-          # invocar este reusable: aca NO hay seleccion (v1.2.0). Si el modo es
+          # invocar este reusable: aca NO hay seleccion (v1.3.0). Si el modo es
           # chain y no llego `issue_number`, es un misconfig del caller ->
           # silencio con step summary (anti-spam).
           if [ -z "${ISSUE_NUMBER:-}" ]; then
